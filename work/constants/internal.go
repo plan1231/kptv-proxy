@@ -18,6 +18,9 @@ type InternalConstants struct {
 	MaxClientSessionDuration time.Duration // Hard cap on a single client streaming session
 	StreamJitterMinMs        time.Duration // Minimum jitter (ms) added before stream retry to prevent thundering herd
 	StreamJitterRangeMs      time.Duration // Random range (ms) added on top of the minimum jitter value
+	ClientBacklogBudget      time.Duration // Per-client outbound queue budget before a slow client is disconnected
+	ClientBacklogBitrateBps  int64         // Target stream bitrate used to size each client's outbound queue
+	ClientWriteTimeout       time.Duration // Max duration allowed for one client socket write/flush operation
 
 	// -------------------------------------------------------------------------
 	// work/restream/restream.go — StreamFromSource() / stream loop
@@ -266,6 +269,9 @@ var Internal = InternalConstants{
 	MaxClientSessionDuration: 24 * time.Hour,
 	StreamJitterMinMs:        50 * time.Millisecond,
 	StreamJitterRangeMs:      450 * time.Millisecond,
+	ClientBacklogBudget:      10 * time.Second,
+	ClientBacklogBitrateBps:  20 * 1000 * 1000, // 20 Mbps target stream size
+	ClientWriteTimeout:       4 * time.Second,
 
 	// -------------------------------------------------------------------------
 	// Stream loop / source selection
