@@ -65,6 +65,19 @@ func putStreamBuffer(buf *[]byte) {
 	streamBufferPool.Put(buf)
 }
 
+func clientWriteQueueDepth() int {
+	backlogBytes := constants.Internal.ClientBacklogBitrateBps * constants.Internal.ClientBacklogBudget.Nanoseconds() / int64(8*time.Second)
+	if backlogBytes <= 0 {
+		return 1
+	}
+
+	depth := int((backlogBytes + int64(constants.Internal.StreamBufferSize) - 1) / int64(constants.Internal.StreamBufferSize))
+	if depth < 1 {
+		return 1
+	}
+	return depth
+}
+
 // Restream wraps types.Restreamer to allow adding methods in this package.
 // This enables higher-level restreaming logic without polluting the base struct.
 type Restream struct {
@@ -117,11 +130,13 @@ func (r *Restream) AddClient(id string, w http.ResponseWriter, flusher http.Flus
 		Writer:  w,
 		Flusher: flusher,
 		Done:    make(chan bool),
+		Queue:   make(chan []byte, clientWriteQueueDepth()),
 	}
 
 	client.LastSeen.Store(time.Now().Unix())
 	r.Clients.Store(id, client)
 	r.LastActivity.Store(time.Now().Unix())
+	go r.writeClientLoop(client)
 
 	clientCount := 0
 	r.Clients.Range(func(key string, value *types.RestreamClient) bool {
@@ -1012,36 +1027,38 @@ func (r *Restream) DistributeToClients(data []byte) int {
 
 	activeClients := 0
 	var failedClients []string
+	var queuedChunk []byte
 
 	r.Clients.Range(func(key string, value *types.RestreamClient) bool {
 		client := value
 		clientID := key
 
-		// recover from any panic on this client's writer or flusher — a client
-		// disconnecting mid-stream can cause the HTTP server's chunked response
-		// finalization to race with our write/flush, corrupting bufio internal
-		// state and producing a double panic that kills the process
-		writeErr := func() (err error) {
-			defer func() {
-				if rec := recover(); rec != nil {
-					err = fmt.Errorf("write/flush panic recovered: %v", rec)
-				}
-			}()
-			_, err = client.Writer.Write(data)
-			if err != nil {
-				return err
-			}
-			client.Flusher.Flush()
-			return nil
-		}()
-
-		if writeErr != nil {
+		if client.Queue == nil {
 			failedClients = append(failedClients, clientID)
 			return true
 		}
 
-		client.LastSeen.Store(time.Now().Unix())
-		activeClients++
+		if queuedChunk == nil {
+			queuedChunk = append([]byte(nil), data...)
+		}
+
+		select {
+		case <-client.Done:
+			failedClients = append(failedClients, clientID)
+			return true
+		default:
+		}
+
+		select {
+		case <-client.Done:
+			failedClients = append(failedClients, clientID)
+		case client.Queue <- queuedChunk:
+			activeClients++
+		default:
+			logger.Debug("{restream/restream - DistributeToClients} Channel %s: Client %s exceeded %s backlog budget", r.Channel.Name, clientID, constants.Internal.ClientBacklogBudget)
+			failedClients = append(failedClients, clientID)
+		}
+
 		return true
 	})
 
@@ -1053,6 +1070,50 @@ func (r *Restream) DistributeToClients(data []byte) int {
 	// logger.Debug("{restream/restream - DistributeToClients} Successfully distributed to %d clients for channel %s", activeClients, r.Channel.Name)
 
 	return activeClients
+}
+
+func (r *Restream) writeClientLoop(client *types.RestreamClient) {
+	for {
+		select {
+		case <-client.Done:
+			return
+		default:
+		}
+
+		select {
+		case <-client.Done:
+			return
+		case data := <-client.Queue:
+			if err := r.writeClientChunk(client, data); err != nil {
+				logger.Debug("{restream/restream - writeClientLoop} Channel %s: Removing client %s after write failure: %v", r.Channel.Name, client.Id, err)
+				r.RemoveClient(client.Id)
+				return
+			}
+		}
+	}
+}
+
+func (r *Restream) writeClientChunk(client *types.RestreamClient, data []byte) (err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			err = fmt.Errorf("write/flush panic recovered: %v", rec)
+		}
+	}()
+
+	controller := http.NewResponseController(client.Writer)
+	_ = controller.SetWriteDeadline(time.Now().Add(constants.Internal.ClientWriteTimeout))
+
+	n, err := client.Writer.Write(data)
+	if err != nil {
+		return err
+	}
+	if n != len(data) {
+		return io.ErrShortWrite
+	}
+
+	client.Flusher.Flush()
+	client.LastSeen.Store(time.Now().Unix())
+	return nil
 }
 
 // SafeBufferWrite writes data to the buffer if it is still valid.

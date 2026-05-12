@@ -12,6 +12,10 @@
 
 A high-performance Go-based IPTV proxy server that intelligently aggregates streams from multiple sources, provides automatic channel deduplication, failover capabilities, and serves them through a unified M3U8 playlist with advanced streaming options including FFmpeg integration.
 
+## Unofficial Fork Notice
+
+This repository is an unofficial fork of KPTV Proxy. It preserves the upstream MIT license notice and adds slow-client isolation so low-bandwidth viewers cannot stall other clients watching the same restreamed channel.
+
 ## Screenshots
 
 <p align="center">

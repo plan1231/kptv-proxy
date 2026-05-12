@@ -115,6 +115,7 @@ type RestreamClient struct {
 	Writer   http.ResponseWriter // HTTP response writer for sending TS/HLS data to the client
 	Flusher  http.Flusher        // HTTP flusher interface for real-time data streaming without buffering delays
 	Done     chan bool           // Completion signal channel for coordinated client disconnection and cleanup
+	Queue    chan []byte         // Bounded per-client outbound queue isolating slow client backpressure
 	LastSeen atomic.Int64        // Atomic Unix timestamp of most recent client activity for inactivity detection
 }
 
